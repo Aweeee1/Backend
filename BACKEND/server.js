@@ -5,26 +5,33 @@ import { connectDB } from "./config/db.js";
 import authRouter from "./routes/auth.js";
 import drivesRouter from "./routes/drives.js";
 import donationsRouter from "./routes/donations.js";
+import usersRouter from "./routes/users.js";
+import { requestLogger } from "./middleware/requestLogger.js";
+import { notFound } from "./middleware/notFound.js";
 
 const app = express();
+const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: process.env.CLIENT_URL }));
-app.use(express.json());
+app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173" }));
+app.use(express.json({ limit: "1mb" }));
+app.use(requestLogger);
 
-app.get("/", (_req, res) => res.send("DAMAYAN API is running. Try /api/drives"));
+app.get("/", (_req, res) => res.json({ name: "DAMAYAN API", version: "2.0", status: "running" }));
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
+
 app.use("/api/auth", authRouter);
 app.use("/api/drives", drivesRouter);
 app.use("/api/donations", donationsRouter);
+app.use("/api/users", usersRouter);
 
-// Your axios interceptor reads error.response.data.message, so always send { message }
+app.use(notFound);
 app.use((err, _req, res, _next) => {
   console.error(err);
-  const status = err.name === "ValidationError" || err.name === "CastError" ? 400 : 500;
-  res.status(status).json({ message: err.message });
+  if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
+  if (err.name === "ValidationError" || err.name === "CastError") return res.status(400).json({ message: err.message });
+  if (err.code === 11000) return res.status(400).json({ message: "A record with that unique value already exists" });
+  res.status(500).json({ message: "Internal server error" });
 });
 
 await connectDB();
-app.listen(process.env.PORT, () =>
-  console.log(`API running on http://localhost:${process.env.PORT}`)
-);
+app.listen(PORT, () => console.log(`DAMAYAN API 2.0 running on http://localhost:${PORT}`));
