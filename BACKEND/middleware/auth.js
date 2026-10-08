@@ -26,3 +26,20 @@ export function requireRole(...roles) {
     next();
   };
 }
+
+// Identifies the caller when a valid token is present, but never rejects.
+// Used on public routes that show more to admins/owners than to anonymous visitors.
+export async function optionalAuth(req, _res, next) {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (token) {
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await User.findById(payload.sub).select("-passwordHash");
+      if (user && user.active) req.user = user;
+    }
+  } catch {
+    // An invalid or expired token is treated as an anonymous visitor
+  }
+  next();
+}

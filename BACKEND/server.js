@@ -30,7 +30,9 @@ app.use((err, _req, res, _next) => {
   if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
   if (err.name === "ValidationError" || err.name === "CastError") return res.status(400).json({ message: err.message });
   if (err.code === 11000) return res.status(400).json({ message: "A record with that unique value already exists" });
-  res.status(500).json({ message: "Internal server error" });
+  // In development, include the real cause so it is visible in the browser; hidden in production
+  const detail = process.env.NODE_ENV === "production" ? undefined : `${err.name}: ${err.message}`;
+  res.status(500).json({ message: "Internal server error", detail });
 });
 
 await connectDB();
