@@ -1,5 +1,21 @@
 {
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "DAMAYAN API (Express + MongoDB)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "seed": "node seed.js"
+  },
   "dependencies": {
-    "dotenv": "^18.0.6"
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.10.4",
+    "multer": "^2.0.2"
   }
 }

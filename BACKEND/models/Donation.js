@@ -7,15 +7,17 @@ const donationSchema = new mongoose.Schema(
     donor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     type: { type: String, required: true, enum: ["Money", "Food", "Clothing", "Education", "Medical", "Household", "Hygiene"] },
     quantity: { type: Number, required: true, min: 1 },
-    method: { type: String, enum: ["pickup", "dropoff", "center"], required: true },
+    method: { type: String, enum: ["dropoff", "center"], default: "dropoff" },
     details: { type: String, required: true, minlength: 10, maxlength: 2000 },
     contactNumber: { type: String, required: true, match: /^(\+63|0)9\d{9}$/ },
-    status: { type: String, enum: ["Pending", "Approved", "Received", "Rejected"], default: "Pending" },
+    status: { type: String, enum: ["Pending", "Approved", "Dropped off", "Received", "Rejected"], default: "Pending" },
     statusHistory: [{
-      status: { type: String, enum: ["Pending", "Approved", "Received", "Rejected"] },
+      status: { type: String, enum: ["Pending", "Approved", "Dropped off", "Received", "Rejected"] },
       changedAt: { type: Date, default: Date.now },
       changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
     }],
+    // Private filename of the uploaded proof of payment (monetary donations only); never sent to clients
+    proofFile: { type: String, select: true },
     receivedAt: Date,
   },
   { timestamps: true }

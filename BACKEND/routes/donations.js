@@ -1,4 +1,10 @@
 import { Router } from "express";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import mongoose from "mongoose";
+import multer from "multer";
 import Donation from "../models/Donation.js";
 import Drive from "../models/Drive.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
@@ -6,22 +12,63 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 const router = Router();
 router.use(requireAuth);
 
+// Proofs of payment are stored privately on disk and only served through an authenticated route
+const proofDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "uploads", "proofs");
+fs.mkdirSync(proofDir, { recursive: true });
+
+const PROOF_TYPES = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf" };
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: proofDir,
+    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${PROOF_TYPES[file.mimetype]}`),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (PROOF_TYPES[file.mimetype]) return cb(null, true);
+    const error = new Error("Proof must be a JPG, PNG, WebP or PDF file");
+    error.statusCode = 400;
+    cb(error);
+  },
+});
+
+const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
+const norm = (value) => String(value ?? "").trim().toLowerCase();
+
+// Same rule as the Match page: items go to drives that request them. Money can support any drive;
+// clothing has no drive category of its own, so it goes to household/emergency relief.
+function driveAccepts(drive, type) {
+  if (type === "Money") return true;
+  if (type === "Clothing") return ["household", "emergency"].includes(norm(drive.category)) || drive.urgent;
+  return norm(drive.category) === norm(type);
+}
+
 const view = (d) => {
-  const x = d.toObject ? d.toObject() : d;
-  return { ...x, drive: d.driveId?.title ?? x.drive ?? "Unknown drive", donorName: d.donor?.name ?? x.donorName };
+  const { proofFile, ...x } = d.toObject ? d.toObject() : d;
+  return { ...x, hasProof: Boolean(proofFile), drive: d.driveId?.title ?? x.drive ?? "Unknown drive", donorName: d.donor?.name ?? x.donorName };
 };
 
 async function changeStatus(d, status, userId) {
-  const transitions = { Pending: ["Approved", "Rejected"], Approved: ["Received", "Rejected"], Received: [], Rejected: [] };
+  // Items: Pending → Approved → Dropped off → Received. Money is paid by QR, so it skips "Dropped off".
+  const isMoney = d.type === "Money";
+  const transitions = {
+    Pending: ["Approved", "Rejected"],
+    Approved: isMoney ? ["Received", "Rejected"] : ["Dropped off", "Rejected"],
+    "Dropped off": ["Received", "Rejected"],
+    Received: [],
+    Rejected: [],
+  };
   if (!transitions[d.status]?.includes(status)) {
     const error = new Error(`Invalid status transition from ${d.status} to ${status}`);
     error.statusCode = 400; throw error;
   }
+  const previous = d.status;
   d.status = status;
   d.statusHistory.push({ status, changedBy: userId });
   if (status === "Received") d.receivedAt = new Date();
   await d.save();
-  if (status === "Received") await Drive.findByIdAndUpdate(d.driveId, { $inc: { raised: d.quantity } });
+  // A donation counts toward the drive's progress once approved (not again when received)
+  if (status === "Approved") await Drive.findByIdAndUpdate(d.driveId, { $inc: { raised: d.quantity } });
+  if (status === "Rejected" && ["Approved", "Dropped off"].includes(previous)) await Drive.findByIdAndUpdate(d.driveId, { $inc: { raised: -d.quantity } });
   return d;
 }
 
@@ -61,6 +108,14 @@ router.get("/admin/:code", requireRole("admin"), async (req, res) => {
   res.json(view(d));
 });
 
+router.get("/:code/proof", async (req, res) => {
+  const filter = req.user.role === "admin" ? { code: req.params.code } : { code: req.params.code, donor: req.user.id };
+  const d = await Donation.findOne(filter);
+  if (!d?.proofFile) return res.status(404).json({ message: "No proof of donation on file" });
+  res.set("X-Content-Type-Options", "nosniff");
+  res.sendFile(path.join(proofDir, path.basename(d.proofFile)));
+});
+
 router.get("/:code", async (req, res) => {
   const filter = req.user.role === "admin" ? { code: req.params.code } : { code: req.params.code, donor: req.user.id };
   const d = await Donation.findOne(filter).populate("driveId", "title");
@@ -68,12 +123,34 @@ router.get("/:code", async (req, res) => {
   res.json(view(d));
 });
 
-router.post("/", async (req, res) => {
-  const last = await Donation.findOne().sort({ createdAt: -1 });
-  const previous = last?.code ? Number(last.code.split("-")[2]) : 0;
-  const code = `DON-${new Date().getFullYear()}-${String(previous + 1).padStart(5, "0")}`;
-  const donation = await Donation.create({ ...req.body, code, donor: req.user.id, statusHistory: [{ status: "Pending", changedBy: req.user.id }] });
-  res.status(201).json(donation);
+router.post("/", upload.single("proof"), async (req, res) => {
+  const discardUpload = () => (req.file ? fs.promises.unlink(req.file.path).catch(() => {}) : undefined);
+  try {
+    // Only accept known fields; status, code and donor are set by the server
+    const { driveId, type, quantity, method, details, contactNumber } = req.body;
+    if (!mongoose.isValidObjectId(driveId)) throw badRequest("Select a valid donation drive");
+    const drive = await Drive.findById(driveId);
+    if (!drive) throw badRequest("That donation drive no longer exists");
+    if (["Completed", "Archived"].includes(drive.status)) throw badRequest("This drive is no longer accepting donations");
+    if (drive.raised >= drive.goal) throw badRequest("This drive has already reached its goal");
+    if (!driveAccepts(drive, type)) throw badRequest(`This drive does not accept ${String(type).toLowerCase()} donations`);
+    if (type === "Money" && !req.file) throw badRequest("Proof of donation is required for monetary donations");
+
+    const last = await Donation.findOne().sort({ createdAt: -1 });
+    const previous = last?.code ? Number(last.code.split("-")[2]) : 0;
+    const code = `DON-${new Date().getFullYear()}-${String(previous + 1).padStart(5, "0")}`;
+    const donation = await Donation.create({
+      driveId, type, quantity, method: method || "dropoff", details, contactNumber,
+      code, donor: req.user.id,
+      proofFile: type === "Money" ? req.file?.filename : undefined,
+      statusHistory: [{ status: "Pending", changedBy: req.user.id }],
+    });
+    if (type !== "Money") await discardUpload();
+    res.status(201).json(view(donation));
+  } catch (error) {
+    await discardUpload();
+    throw error;
+  }
 });
 
 router.patch("/:code/status", requireRole("collector", "admin"), async (req, res) => {

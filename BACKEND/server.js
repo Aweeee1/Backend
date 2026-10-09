@@ -27,6 +27,7 @@ app.use("/api/users", usersRouter);
 app.use(notFound);
 app.use((err, _req, res, _next) => {
   console.error(err);
+  if (err.name === "MulterError") return res.status(400).json({ message: err.code === "LIMIT_FILE_SIZE" ? "File must be 10 MB or smaller" : err.message });
   if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
   if (err.name === "ValidationError" || err.name === "CastError") return res.status(400).json({ message: err.message });
   if (err.code === 11000) return res.status(400).json({ message: "A record with that unique value already exists" });
